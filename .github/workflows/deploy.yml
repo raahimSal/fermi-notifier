@@ -105,7 +105,6 @@ jobs:
             --min-instances=0 \
             --max-instances=1 \
             --quiet
-            --async
             # Note: --allow-unauthenticated is OMITTED here.
             # Ensure your service requires authentication for this to deploy successfully.
             # If deployment fails due to auth, check Phase 5.
