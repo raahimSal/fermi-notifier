@@ -1,0 +1,110 @@
+name: Deploy Fermi Notifier to Cloud Run
+
+# Trigger deployment only on push to the main branch
+on:
+  push:
+    branches:
+      - main
+
+env:
+  # Values dynamically read from GitHub Secrets
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GCP_REGION: ${{ secrets.GCP_REGION }}
+  GCP_SA_EMAIL: ${{ secrets.GCP_SA_EMAIL }}
+  GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+
+  # --- Static configuration - Customize if needed ---
+  GAR_LOCATION: ${{ secrets.GCP_REGION }} # Artifact Registry location (usually same as GCP_REGION)
+  SERVICE_NAME: fermi-notifier-service # Your Cloud Run service name
+  REPOSITORY_NAME: docker-repo # Your Artifact Registry repository name
+  IMAGE_NAME: fermi-notifier # Your desired Docker image name
+  # --- End static configuration ---
+
+jobs:
+  build-test-deploy:
+    name: Build, Test, and Deploy
+    runs-on: ubuntu-latest
+    # Required permissions for Workload Identity Federation token exchange
+    permissions:
+      contents: "read"
+      id-token: "write"
+
+    steps:
+      # 1. Get the source code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Set up Rust environment
+      - name: Set up Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable # Or specify your Rust version
+
+      # 3. Cache Rust dependencies for speed (optional but recommended)
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      # --- CI Steps ---
+      # 4. Check code formatting
+      - name: Check formatting
+        run: cargo fmt --check
+
+      # 5. Run Clippy for style and correctness checks
+      - name: Check clippy lints
+        run: cargo clippy -- -D warnings # Fail build on any warnings
+
+      # 6. Run unit/integration tests
+      - name: Run tests
+        run: cargo test
+
+      # --- CD Steps ---
+      # 7. Authenticate to Google Cloud using WIF
+      - id: "auth"
+        name: Authenticate to Google Cloud
+        uses: "google-github-actions/auth@v2"
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SA_EMAIL }}
+
+      # 8. Set up gcloud CLI in the runner
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      # 9. Configure Docker to authenticate with Artifact Registry (needed for Cloud Build)
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev --quiet
+
+      # 10. Build Docker image using Cloud Build and push to Artifact Registry
+      # Cloud Build uses the code context from the workflow runner.
+      - name: Build and Push Docker Image via Cloud Build
+        run: |-
+          gcloud builds submit --tag "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.REPOSITORY_NAME }}/${{ env.IMAGE_NAME }}:latest" . --project=${{ env.GCP_PROJECT_ID }} --quiet
+
+      # 11. Deploy the new image to Cloud Run
+      - name: Deploy to Cloud Run
+        run: |-
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image "${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.REPOSITORY_NAME }}/${{ env.IMAGE_NAME }}:latest" \
+            --region ${{ env.GCP_REGION }} \
+            --platform managed \
+            --project=${{ env.GCP_PROJECT_ID }} \
+            --set-secrets="GEMINI_API_KEY=gemini-api-key:latest,NTFY_TOPIC=ntfy-topic:latest" \
+            --set-env-vars="RUST_LOG=info" \
+            --cpu=1 \
+            --memory=256Mi \
+            --min-instances=0 \
+            --max-instances=1 \
+            --quiet
+            # Note: --allow-unauthenticated is OMITTED here.
+            # Ensure your service requires authentication for this to deploy successfully.
+            # If deployment fails due to auth, check Phase 5.
