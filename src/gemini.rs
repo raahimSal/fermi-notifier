@@ -112,8 +112,8 @@ pub async fn generate_fermi_problem_and_solution(
     let response_body: GeminiResponse = response.json().await?;
     let generated_text = response_body
         .candidates
-        .get(0)
-        .and_then(|c| c.content.parts.get(0))
+        .first()
+        .and_then(|c| c.content.parts.first())
         .map(|p| p.text.trim().to_string())
         .ok_or_else(|| {
             AppError::GeminiApi("No text content found in Gemini response".to_string())
